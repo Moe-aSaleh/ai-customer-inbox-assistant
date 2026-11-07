@@ -1,0 +1,489 @@
+{
+  "name": "AI Customer Inbox Assistant",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## AI Customer Inbox Assistant\nCustomer complaints arrive by web form or API. An AI agent investigates each one, logs it, and alerts the team about urgent issues with a ready-to-review reply.\n\n**Flow:** Form / API → Normalize input → Triage Agent → Count history → Prepare record → Log to sheet → Is urgent? → Email + Telegram alert\n\n**Triage Agent** (Claude Haiku, max 5 steps, 2 read-only tools)\n- Customer history: past complaints by email\n- Known issues: matches known bugs and workarounds\n- Returns severity, known issue and a draft reply (structured JSON)\n\n**Guardrails**\n- Severity checked in code; anything unexpected → needs_review\n- Repeat-customer count done in code, not by the AI\n- Few-shot examples + specific reply rules\n- Reply Check flags invented promises, extra questions or false \"notified\" claims\n- A human reviews and sends every reply\n\n**Error handling:** retries 3× · AI, Sheets and email failures never stop the alert · Error Alerts workflow\n\n**Cost:** about $1 per 1,000 complaints (AI) + hosting\n\nBuilt by Moe · Nov 2026",
+        "height": 420,
+        "width": 560,
+        "color": 4
+      },
+      "id": "d9e1431c-720c-4b65-8cb0-a276df1cccac",
+      "name": "About this workflow",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-144, -464]
+    },
+    {
+      "parameters": {
+        "formTitle": "Report a problem",
+        "formDescription": "Tell us what went wrong and we'll look into it.",
+        "formFields": {
+          "values": [
+            { "fieldLabel": "Name", "requiredField": true },
+            { "fieldLabel": "Email", "requiredField": true },
+            { "fieldLabel": "Complaint", "fieldType": "textarea", "requiredField": true }
+          ]
+        },
+        "options": {
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Thanks! We've received your report. Our team reviews every message, and urgent issues are handled first."
+            }
+          }
+        }
+      },
+      "id": "cde4d129-978a-4a51-b32b-a6f85722198e",
+      "name": "Report a problem",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [-16, 0]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "complaint",
+        "authentication": "headerAuth",
+        "options": {
+          "responseData": "{\"status\":\"received\",\"message\":\"Thanks, your complaint is being processed.\"}",
+          "responseHeaders": {
+            "entries": [
+              { "name": "Content-Type", "value": "application/json" }
+            ]
+          }
+        }
+      },
+      "id": "451863da-7056-4070-8945-263f67070a06",
+      "name": "Receive complaint (API)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-16, 240],
+      "credentials": {
+        "httpHeaderAuth": { "name": "Header Auth account" }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "fa23b013-585c-467b-a359-0067844c6684",
+              "name": "complaint",
+              "type": "string",
+              "value": "={{ String($json.body?.complaint ?? $json.Complaint ?? '').trim() }}"
+            },
+            {
+              "id": "b2c1d0e1-0001-4b00-9000-00000000a001",
+              "name": "name",
+              "type": "string",
+              "value": "={{ String($json.body?.name ?? $json.Name ?? '').trim() || 'Unknown' }}"
+            },
+            {
+              "id": "b2c1d0e1-0002-4b00-9000-00000000a002",
+              "name": "email",
+              "type": "string",
+              "value": "={{ String($json.body?.email ?? $json.Email ?? '').trim() || 'Unknown' }}"
+            },
+            {
+              "id": "b2c1d0e1-0003-4b00-9000-00000000a003",
+              "name": "source",
+              "type": "string",
+              "value": "={{ $json.body ? 'api' : 'form' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4bf8c028-8ac8-475d-9394-38b7c4687f75",
+      "name": "Normalize input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [336, 0]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Customer name: {{ $json.name }}\nCustomer email: {{ $json.email }}\n\n<complaint>\n{{ $json.complaint }}\n</complaint>",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a senior QA and customer support engineer for PM Test, a web and mobile app for managing floor plans. You triage customer complaints.\n\nFor every complaint:\n1. Use the \"Customer history\" tool with the customer's email to find their previous complaints. If the email is \"Unknown\", skip this step and use 0.\n2. Use the \"Known issues\" tool to check whether the complaint matches a known issue. Compare meaning, not just exact words.\n3. Decide the severity.\n4. Draft a reply to the customer.\n\nSeverity scale:\n- critical: data loss, security issue, or the whole app is unusable\n- high: a main feature is broken with no workaround\n- medium: a feature is broken but a workaround exists\n- low: cosmetic or minor issue\n\nSeverity rules:\n- If the complaint is too vague to judge (for example \"app not working\" with no details), use: unclear\n- If you are unsure between two levels, choose the more severe one.\n\nReply rules:\n- Write in the same language as the complaint (Arabic or English).\n- Be polite and short (under 120 words).\n- If a known issue matches, give its workaround exactly as written in the Known issues sheet. Do not add promises about the result.\n- Never promise a fix date. Never invent features, causes or timelines.\n- If the complaint is unclear, ask exactly one clarifying question.\n- Ask at most one question in total, in every reply.\n- Never say \"escalated\", \"priority\" or \"urgent\", and never tell the customer what not to do.\n- For a serious issue (critical or high) with no known workaround, say only: \"Our support team has been notified.\" Do not use that sentence for medium or low issues.\n- Sign off in the same language as the reply. English: \"The PM Test Support Team\". Arabic: \"فريق دعم PM Test\".\n\nExample replies (follow this style, length and tone):\n\n<example>\nComplaint: Nothing works since this morning\nKnown issue: none\nsuggested_reply: Hello, thank you for contacting us, and sorry for the trouble. So we can look into this, could you tell us what happens when you try to use the app?\n\nBest regards,\nThe PM Test Support Team\n</example>\n\n<example>\nComplaint: I can't download my report as an Excel file, the button does nothing\nKnown issue: Export to Excel fails (workaround: Export as CSV, then open in Excel; status: Fix in progress)\nsuggested_reply: Hello, thank you for reporting this. This is a known issue that our team is working on. In the meantime, you can export your report as CSV and then open it in Excel.\n\nBest regards,\nThe PM Test Support Team\n</example>\n\n<example>\nComplaint: I logged in and all my invoices are gone\nKnown issue: none\nsuggested_reply: Hello, thank you for contacting us, and we're sorry about this. Our support team has been notified and will look into it. So we can investigate, could you tell us when you last saw your invoices?\n\nBest regards,\nThe PM Test Support Team\n</example>\n\nReturn:\n- severity: critical, high, medium, low or unclear\n- previous_complaints: the number of previous complaints found\n- known_issue: the name of the matching known issue, or \"none\"\n- suggested_reply: your draft reply",
+          "maxIterations": 5
+        }
+      },
+      "id": "a9e47000-0001-4e00-9000-0000000000c1",
+      "name": "Triage Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "position": [608, 0]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-haiku-5-5",
+          "mode": "list",
+          "cachedResultName": "Claude Haiku 5.5"
+        },
+        "options": {}
+      },
+      "id": "e1998aac-4b8a-452d-865a-f3d43d8debf0",
+      "name": "Claude Haiku",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [480, 272],
+      "credentials": {
+        "anthropicApi": { "name": "Anthropic account" }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Look up previous complaints from one customer. Input: the customer's email address. Returns their past complaint rows (date, complaint, severity).",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "Email",
+              "lookupValue": "={{ $fromAI('email', 'The customer email address to look up', 'string') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a9e47000-0002-4e00-9000-0000000000c2",
+      "name": "Customer history",
+      "type": "n8n-nodes-base.googleSheetsTool",
+      "typeVersion": 4.7,
+      "position": [640, 272],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "name": "Google Sheets account" }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Returns the list of known product issues, with keywords, workaround and status. Use it to check whether a complaint matches a known issue.",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Known Issues",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "a9e47000-0003-4e00-9000-0000000000c3",
+      "name": "Known issues",
+      "type": "n8n-nodes-base.googleSheetsTool",
+      "typeVersion": 4.7,
+      "position": [800, 272],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "name": "Google Sheets account" }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"severity\": { \"type\": \"string\", \"enum\": [\"critical\", \"high\", \"medium\", \"low\", \"unclear\"] },\n    \"previous_complaints\": { \"type\": \"number\" },\n    \"known_issue\": { \"type\": \"string\" },\n    \"suggested_reply\": { \"type\": \"string\" }\n  },\n  \"required\": [\"severity\", \"previous_complaints\", \"known_issue\", \"suggested_reply\"]\n}"
+      },
+      "id": "a9e47000-0004-4e00-9000-0000000000c4",
+      "name": "Triage output format",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [960, 272]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "Email",
+              "lookupValue": "={{ $('Normalize input').first().json.email }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a9e47000-0021-4e00-9000-0000000000e1",
+      "name": "Count history",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "position": [800, -176],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "name": "Google Sheets account" }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "83880e7d-c6bf-4bdb-a53e-cef4277713e3",
+              "name": "Date",
+              "type": "string",
+              "value": "={{ $now.format('yyyy-MM-dd HH:mm') }}"
+            },
+            {
+              "id": "fd59ae0b-3717-4a2f-99fc-c0349b3e01e5",
+              "name": "Name",
+              "type": "string",
+              "value": "={{ $('Normalize input').first().json.name }}"
+            },
+            {
+              "id": "9686cab0-000c-471b-aa5e-594f761b1630",
+              "name": "Email",
+              "type": "string",
+              "value": "={{ $('Normalize input').first().json.email }}"
+            },
+            {
+              "id": "cb994d83-d584-432d-a540-89fb97e8f3f2",
+              "name": "Complaint",
+              "type": "string",
+              "value": "={{ $('Normalize input').first().json.complaint || '(empty complaint)' }}"
+            },
+            {
+              "id": "db5dff89-3bfc-489c-90ba-f3b2c5cb13f6",
+              "name": "Severity",
+              "type": "string",
+              "value": "={{ !$('Normalize input').first().json.complaint ? 'needs_review' : (['critical','high','medium','low'].includes(String($('Triage Agent').first().json.output?.severity ?? '').toLowerCase().replace(/[^a-z]/g, '')) ? String($('Triage Agent').first().json.output?.severity ?? '').toLowerCase().replace(/[^a-z]/g, '') : 'needs_review') }}"
+            },
+            {
+              "id": "b2c1d0e1-0004-4b00-9000-00000000a004",
+              "name": "Source",
+              "type": "string",
+              "value": "={{ $('Normalize input').first().json.source }}"
+            },
+            {
+              "id": "a9e47000-0011-4e00-9000-0000000000d1",
+              "name": "Previous Complaints",
+              "type": "string",
+              "value": "={{ ($('Normalize input').first().json.email === 'Unknown' || $('Count history').all().some(i => i.json.error)) ? 'unknown' : String($('Count history').all().filter(i => i.json.Email).length) }}"
+            },
+            {
+              "id": "a9e47000-0012-4e00-9000-0000000000d2",
+              "name": "Known Issue",
+              "type": "string",
+              "value": "={{ $('Triage Agent').first().json.output?.known_issue || 'none' }}"
+            },
+            {
+              "id": "a9e47000-0013-4e00-9000-0000000000d3",
+              "name": "Suggested Reply",
+              "type": "string",
+              "value": "={{ $('Triage Agent').first().json.output?.suggested_reply || '(no draft: the agent could not process this complaint)' }}"
+            },
+            {
+              "id": "a9e47000-0014-4e00-9000-0000000000d4",
+              "name": "Reply Check",
+              "type": "string",
+              "value": "={{ (() => { const r = String($('Triage Agent').first().json.output?.suggested_reply ?? ''); const sev = String($('Triage Agent').first().json.output?.severity ?? '').toLowerCase(); const issues = []; if (/escalat|priorit|urgent|do not make|don't make|avoid making/i.test(r)) issues.push('promises or instructions'); if ((r.match(/\\?/g) || []).length > 1) issues.push('more than one question'); if (/notified/i.test(r) && !['critical','high','unclear'].includes(sev)) issues.push('says the team was notified, but no alert is sent for this severity'); return issues.length ? '⚠️ Review before sending: ' + issues.join(', ') : 'OK'; })() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "02346281-8d88-43b7-9109-77845576fde7",
+      "name": "Prepare record",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "executeOnce": true,
+      "position": [944, 0]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "6c698dd7-b015-43be-96cd-5859c638f740",
+      "name": "Log to sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "position": [1168, 0],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "name": "Google Sheets account" }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "a10f5273-a768-4b25-9ff8-c3aa93129688",
+              "leftValue": "={{ $('Prepare record').item.json.Severity }}",
+              "rightValue": "critical",
+              "operator": { "type": "string", "operation": "equals" }
+            },
+            {
+              "id": "0753505d-d2e9-43e5-bc82-4b9030137d5a",
+              "leftValue": "={{ $('Prepare record').item.json.Severity }}",
+              "rightValue": "high",
+              "operator": { "type": "string", "operation": "equals" }
+            },
+            {
+              "id": "c1f0a9b2-1111-4c3d-9e8f-000000000003",
+              "leftValue": "={{ $('Prepare record').item.json.Severity }}",
+              "rightValue": "needs_review",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "b9c9e705-23e1-46fd-a553-d613c9b3b09f",
+      "name": "Is urgent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [1424, 0]
+    },
+    {
+      "parameters": {
+        "sendTo": "YOUR_ALERT_EMAIL",
+        "subject": "={{ ({critical: '🔴', high: '🟠'})[$('Prepare record').item.json.Severity] ?? '🟣' }} {{ $('Prepare record').item.json.Severity.replace('_', ' ').toUpperCase() }} complaint from {{ $('Prepare record').item.json.Name }}",
+        "emailType": "text",
+        "message": "={{ $('Prepare record').item.json.Severity === 'needs_review' ? 'The AI could not classify this complaint. Please review it manually.\\n\\n' : '' }}New {{ $('Prepare record').item.json.Severity.replace('_', ' ') }} complaint.\n\nFrom: {{ $('Prepare record').item.json.Name }} ({{ $('Prepare record').item.json.Email }})\nDate: {{ $('Prepare record').item.json.Date }}\nSource: {{ $('Prepare record').item.json.Source }}\n\nComplaint:\n{{ $('Prepare record').item.json.Complaint }}\n\nPrevious complaints from this customer: {{ $('Prepare record').item.json['Previous Complaints'] }}\nKnown issue: {{ $('Prepare record').item.json['Known Issue'] }}\n\nReply check: {{ $('Prepare record').item.json['Reply Check'] }}\nSuggested reply (review before sending):\n{{ $('Prepare record').item.json['Suggested Reply'] }}\n\n{{ $json.error ? '⚠️ This complaint was NOT logged in the sheet. Please add it manually.' : 'Logged in the Complaints Log sheet.' }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "76212dac-60b1-4d8f-8898-d278c12a2525",
+      "name": "Email alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "position": [1648, -96],
+      "credentials": {
+        "gmailOAuth2": { "name": "Gmail account" }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ ({critical: '🔴', high: '🟠'})[$('Prepare record').item.json.Severity] ?? '🟣' }} {{ $('Prepare record').item.json.Severity.replace('_', ' ').toUpperCase() }} complaint\nFrom: {{ $('Prepare record').item.json.Name }} ({{ $('Prepare record').item.json.Email }})\nSource: {{ $('Prepare record').item.json.Source }} · {{ $('Prepare record').item.json.Date }}\n\n{{ $('Prepare record').item.json.Complaint.slice(0, 500) }}\n\nRepeat: {{ $('Prepare record').item.json['Previous Complaints'] }} previous · Known issue: {{ $('Prepare record').item.json['Known Issue'] }}\n\nReply check: {{ $('Prepare record').item.json['Reply Check'] }}\nDraft reply:\n{{ $('Prepare record').item.json['Suggested Reply'].slice(0, 1500) }}{{ $json.error ? '\\n\\n⚠️ NOT logged in the sheet' : '' }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "b5554db2-0250-437b-b0ac-739fba76b0e0",
+      "name": "Telegram alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "position": [1648, 112],
+      "credentials": {
+        "telegramApi": { "name": "Telegram account" }
+      }
+    }
+  ],
+  "connections": {
+    "Report a problem": {
+      "main": [[{ "node": "Normalize input", "type": "main", "index": 0 }]]
+    },
+    "Receive complaint (API)": {
+      "main": [[{ "node": "Normalize input", "type": "main", "index": 0 }]]
+    },
+    "Normalize input": {
+      "main": [[{ "node": "Triage Agent", "type": "main", "index": 0 }]]
+    },
+    "Claude Haiku": {
+      "ai_languageModel": [[{ "node": "Triage Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Customer history": {
+      "ai_tool": [[{ "node": "Triage Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Known issues": {
+      "ai_tool": [[{ "node": "Triage Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Triage output format": {
+      "ai_outputParser": [[{ "node": "Triage Agent", "type": "ai_outputParser", "index": 0 }]]
+    },
+    "Triage Agent": {
+      "main": [[{ "node": "Count history", "type": "main", "index": 0 }]]
+    },
+    "Count history": {
+      "main": [[{ "node": "Prepare record", "type": "main", "index": 0 }]]
+    },
+    "Prepare record": {
+      "main": [[{ "node": "Log to sheet", "type": "main", "index": 0 }]]
+    },
+    "Log to sheet": {
+      "main": [[{ "node": "Is urgent?", "type": "main", "index": 0 }]]
+    },
+    "Is urgent?": {
+      "main": [
+        [
+          { "node": "Email alert", "type": "main", "index": 0 },
+          { "node": "Telegram alert", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

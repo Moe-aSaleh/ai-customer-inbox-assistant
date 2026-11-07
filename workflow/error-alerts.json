@@ -1,0 +1,83 @@
+{
+  "name": "Error Alerts",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "e1a0c0de-0001-4a00-9000-000000000001",
+      "name": "When any workflow fails",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "sendTo": "YOUR_ALERT_EMAIL",
+        "subject": "=⚠️ n8n workflow failed: {{ $json.workflow.name }}",
+        "emailType": "text",
+        "message": "=A workflow failed and may have lost data.\n\nWorkflow: {{ $json.workflow.name }}\nFailed step: {{ $json.execution.lastNodeExecuted }}\nError: {{ $json.execution.error.message }}\nTime: {{ $now.format('yyyy-MM-dd HH:mm') }}\n\nOpen the execution: {{ $json.execution.url }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "e1a0c0de-0002-4a00-9000-000000000002",
+      "name": "Email me the error",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "position": [272, 0],
+      "credentials": {
+        "gmailOAuth2": { "name": "Gmail account" }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=⚠️ n8n workflow failed: {{ $json.workflow.name }}\nStep: {{ $json.execution.lastNodeExecuted }}\nError: {{ $json.execution.error.message }}\nTime: {{ $now.format('yyyy-MM-dd HH:mm') }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "e1a0c0de-0004-4a00-9000-000000000004",
+      "name": "Telegram me the error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "position": [272, 208],
+      "credentials": {
+        "telegramApi": { "name": "Telegram account" }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Error Alerts\nRuns automatically when a workflow that uses it as its Error Workflow fails, and sends the details by email and Telegram.\n\nTelegram is the backup if the Gmail login expires.\n⚠️ Only runs for automatic (production) executions, not manual test runs.",
+        "height": 200,
+        "width": 460,
+        "color": 3
+      },
+      "id": "e1a0c0de-0003-4a00-9000-000000000003",
+      "name": "About this workflow",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-48, -256]
+    }
+  ],
+  "connections": {
+    "When any workflow fails": {
+      "main": [
+        [
+          { "node": "Email me the error", "type": "main", "index": 0 },
+          { "node": "Telegram me the error", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

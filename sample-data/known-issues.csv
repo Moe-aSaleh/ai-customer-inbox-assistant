@@ -1,0 +1,4 @@
+Issue,Keywords,Workaround,Status
+Export to Excel fails,"export, excel, download","Export as CSV, then open in Excel",Fix in progress
+Upload spins forever on iPhone,"upload, iphone, spinning, floor plan",Upload from a desktop browser,Investigating
+Login loop after password reset,"login, password, reset",Clear browser cookies and log in again,Fixed in next release
